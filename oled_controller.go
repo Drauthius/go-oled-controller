@@ -171,7 +171,7 @@ func (oled *OLEDController) DrawMaster(quit chan bool, wg *sync.WaitGroup) {
 // Fill the content of the slave screen with system statistics.
 func (oled *OLEDController) DrawSlave(quit chan bool, wg *sync.WaitGroup) {
 	results := make(chan []float64, 5)
-	barLen := oled.columns - 7
+	barLen := oled.columns - 6
 	columns := []string{"CPU%", "Mem%", "Swap", "Disk"}
 
 	defer wg.Done()
