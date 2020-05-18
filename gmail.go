@@ -94,7 +94,7 @@ func saveTokenToFile(file string, token *oauth2.Token) {
 }
 
 // Start a loop that gets the count of unread messages for a specific label.
-func GmailGetNumUnread(credentials string, label string, result chan int64) {
+func GmailGetNumUnread(credentials string, label string, result chan int64, quit chan bool) {
 	defer close(result)
 
 	configContent, err := ioutil.ReadFile(credentials)
@@ -122,6 +122,10 @@ func GmailGetNumUnread(credentials string, label string, result chan int64) {
 			result <- label.MessagesUnread
 		}
 
-		time.Sleep(1 * time.Minute)
+		select {
+		case <-time.After(1 * time.Minute):
+		case <-quit:
+			return
+		}
 	}
 }

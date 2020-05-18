@@ -16,7 +16,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/karalabe/hid"
+	"github.com/bearsh/hid"
 )
 
 // The USB vendor ID to look for.
@@ -105,18 +105,21 @@ func (oled *OLEDController) DrawMaster(quit chan bool, wg *sync.WaitGroup) {
 	info := []string{"", "Layer: %l", "You look great today!", ""}
 	unreadMails := make(chan int64, 5)
 	weatherReport := make(chan WeatherResult, 5)
+	stop := make(chan bool, 2)
 
 	defer wg.Done()
-	defer close(unreadMails)
-	defer close(weatherReport)
 	defer oled.SendCommand(Clear, Master, nil)
 
+	wait := 0
+
 	if *gArgs.gmailCredentials != "" {
-		go GmailGetNumUnread(*gArgs.gmailCredentials, *gArgs.gmailLabel, unreadMails)
+		go GmailGetNumUnread(*gArgs.gmailCredentials, *gArgs.gmailLabel, unreadMails, stop)
+		wait++
 	}
 
 	if *gArgs.weatherKey != "" && *gArgs.weatherLocation != "" {
-		go WeatherGetTemperature(*gArgs.weatherKey, *gArgs.weatherUnit, *gArgs.weatherLocation, weatherReport)
+		go WeatherGetTemperature(*gArgs.weatherKey, *gArgs.weatherUnit, *gArgs.weatherLocation, weatherReport, stop)
+		wait++
 	}
 
 	// TODO: Replace more characters, since the firmware probably only supports [a-zA-Z]
@@ -130,12 +133,20 @@ func (oled *OLEDController) DrawMaster(quit chan bool, wg *sync.WaitGroup) {
 		case numUnread, more := <-unreadMails:
 			if !more {
 				info[2] = ""
+				wait--
+				if wait < 1 {
+					return
+				}
 				continue
 			}
 			info[2] = fmt.Sprintf("%s%d unread emails", MAIL_ICON, numUnread)
 		case weather, more := <-weatherReport:
 			if !more {
 				info[3] = ""
+				wait--
+				if wait < 1 {
+					return
+				}
 				continue
 			}
 			info[3] = fmt.Sprintf("%s%d%s%s in %s",
@@ -146,7 +157,13 @@ func (oled *OLEDController) DrawMaster(quit chan bool, wg *sync.WaitGroup) {
 				replacer.Replace(strings.Split(*gArgs.weatherLocation, ",")[0]))
 		case <-time.After(1 * time.Second):
 		case <-quit:
-			return
+			if wait < 1 {
+				return
+			} else {
+				for i := 0; i < wait; i++ {
+					stop <- true
+				}
+			}
 		}
 	}
 }
@@ -158,10 +175,9 @@ func (oled *OLEDController) DrawSlave(quit chan bool, wg *sync.WaitGroup) {
 	columns := []string{"CPU%", "Mem%", "Swap", "Disk"}
 
 	defer wg.Done()
-	defer close(results)
 	defer oled.SendCommand(Clear, Slave, nil)
 
-	go SysStatsGet(1*time.Second, results)
+	go SysStatsGet(1*time.Second, results, quit)
 	for {
 		select {
 		case values, more := <-results:
@@ -176,8 +192,6 @@ func (oled *OLEDController) DrawSlave(quit chan bool, wg *sync.WaitGroup) {
 				output[i] = fmt.Sprintf("%s[%-*s]", columns[i], barLen, strings.Repeat(BAR_CHAR, int(math.Round(float64(barLen)*value))))
 			}
 			oled.DrawScreen(Slave, output)
-		case <-quit:
-			return
 		}
 	}
 }
@@ -218,7 +232,7 @@ func (oled *OLEDController) SendCommand(cmd Command, screen Screen, data []byte)
 
 	_, err := oled.device.Write(buf)
 	if err != nil {
-		log.Fatalln("Failed to write to device:", err)
+		log.Println("Failed to write to device:", err)
 		return false
 	}
 	if *gArgs.debug {
@@ -229,30 +243,40 @@ func (oled *OLEDController) SendCommand(cmd Command, screen Screen, data []byte)
 }
 
 // Read a response from the OLED controller.
-func (oled *OLEDController) ReadResponse() []byte {
+func (oled *OLEDController) ReadResponse() ([]byte, error) {
 	buf := make([]byte, 32)
-	size, err := oled.device.Read(buf)
+	size, err := oled.device.ReadTimeout(buf, 500)
 	if err != nil {
-		log.Fatalln("Failed to read from device:", err)
-		return nil
+		log.Println("Failed to read from device:", err)
+		return nil, err
+	} else if size < 1 {
+		return nil, nil
 	}
+
 	if *gArgs.debug {
 		log.Println("<", buf[:size])
 	}
 	if buf[0] != 0 {
 		log.Printf("Command 0x%02X failed with error 0x%02X.", buf[2], buf[0])
-		return nil
+		return nil, nil
 	}
-	return buf[4:]
+	return buf[4:], nil
 }
 
 // Loop setting up and filling the OLED screens.
 func (oled *OLEDController) Run() {
+	defer oled.device.Close()
+
+	if err := oled.device.SetNonblocking(false); err != nil {
+		log.Println("Failed to set the device blocking.")
+		return
+	}
+
 	// Start by setting up
 	oled.SendCommand(SetUp, Master, nil)
-	resp := oled.ReadResponse()
+	resp, _ := oled.ReadResponse()
 	if resp == nil {
-		log.Fatalln("Set up failed. Bailing.")
+		log.Println("Set up failed.")
 		return
 	}
 
@@ -264,9 +288,11 @@ func (oled *OLEDController) Run() {
 	}
 	if oled.columns < 1 || oled.rows < 1 {
 		log.Println("Failed to get screen size from set up.")
-		oled.device.Close()
 		return
 	}
+
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 
 	var wg sync.WaitGroup
 	quit := make(chan bool, 5)
@@ -280,7 +306,11 @@ func (oled *OLEDController) Run() {
 			case <-quit:
 				return
 			default:
-				oled.ReadResponse()
+				if _, err := oled.ReadResponse(); err != nil {
+					// Read error. Device is probably unreachable.
+					sigs <- syscall.SIGHUP
+					return
+				}
 			}
 		}
 	}()
@@ -292,18 +322,29 @@ func (oled *OLEDController) Run() {
 	go oled.DrawSlave(quit, &wg)
 
 	// Wait for signal
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-	<-sigs
+	sig := <-sigs
 
-	log.Println("Exiting")
+	log.Println("Stopping due to", sig)
 
 	for i := 0; i < 3; i++ {
 		quit <- true
 	}
 	wg.Wait()
-	oled.device.Close()
-	os.Exit(0)
+
+	if err := oled.device.SetNonblocking(true); err == nil {
+		// Consume any lingering messages
+		for {
+			if resp, _ := oled.ReadResponse(); resp == nil {
+				break
+			}
+		}
+	}
+
+	if sig == syscall.SIGHUP {
+		return
+	} else {
+		os.Exit(0)
+	}
 }
 
 // Main function, which handles flags and looks for the correct USB HID device.
@@ -314,7 +355,7 @@ func main() {
 	gArgs.debug = flag.Bool("debug", false, "Whether debug output should be produced")
 
 	if runtime.GOOS == "linux" {
-		gArgs.sysStatDisk = flag.String("sysstat-disk", "sda", "Which disk to monitor for system stats")
+		gArgs.sysStatDisk = flag.String("sysstat-disk", "sda", "Which disk to monitor for I/O usage")
 	}
 
 	gArgs.gmailCredentials = flag.String("gmail-credentials", "", "Path to JSON credential file for GMail access")

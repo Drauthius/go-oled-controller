@@ -16,19 +16,23 @@ import (
 )
 
 // Start TypePerf for the specified fields (counters), and feed the results to the specified channel.
-func typeperf(interval uint, result chan []string, fields []string) {
+func typeperf(interval uint, result chan []string, quit chan bool, fields []string) {
+	defer close(result)
+
 	fields = append(append(fields, "-si"), strconv.Itoa(int(interval)))
 	cmd := exec.Command("TypePerf", fields...)
 	cmd.Stderr = os.Stderr
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		log.Fatalln("Failed to connect stdout for TypePerf: ", err)
+		log.Println("Failed to connect stdout for TypePerf: ", err)
 		return
 	} else if err := cmd.Start(); err != nil {
 		log.Println("Failed to start TypePerf:", err)
 		return
 	}
+
+	defer cmd.Process.Kill()
 
 	reader := bufio.NewReader(stdout)
 
@@ -37,22 +41,28 @@ func typeperf(interval uint, result chan []string, fields []string) {
 	reader.ReadString('\n')
 
 	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			log.Println("Read error from TypePerf:", err)
-			close(result)
+		select {
+		case <-quit:
 			return
-		}
+		default:
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				log.Println("Read error from TypePerf:", err)
+				return
+			}
 
-		result <- strings.Split(strings.TrimSuffix(line, "\r\n"), ",")
+			result <- strings.Split(strings.TrimSuffix(line, "\r\n"), ",")
+		}
 	}
 }
 
 // Get system statistics at the specified interval, rounded to whole seconds.
 // This will get the current CPU, memory, swap (page file), and disk usage in fractions (0.0-1.0)
-func SysStatsGet(interval time.Duration, results chan []float64) {
+func SysStatsGet(interval time.Duration, results chan []float64, quit chan bool) {
+	defer close(results)
+
 	tp := make(chan []string, 5)
-	go typeperf(uint(interval.Seconds()), tp, []string{
+	go typeperf(uint(interval.Seconds()), tp, quit, []string{
 		`\Processor(_Total)\% Processor Time`,
 		`\Memory\% Committed Bytes In Use`,
 		`\Paging file(_Total)\% Usage`,
@@ -91,7 +101,7 @@ func SysStatsGet(interval time.Duration, results chan []float64) {
 			results <- values
 		case <-time.After(10 * time.Second):
 			log.Println("TypePerf read timed out")
-			return
+			quit <- true // FIXME: This is not enough if the process has hung
 		}
 	}
 }

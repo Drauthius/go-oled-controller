@@ -60,7 +60,7 @@ var WEATHER_ICONS = map[WeatherType]string{
 
 // Start a loop that gets the current temperature (in the specified unit as "C", "F", or "K") and weather status at the
 // specified location, with the specified API key.
-func WeatherGetTemperature(apiKey string, unit string, location string, result chan WeatherResult) {
+func WeatherGetTemperature(apiKey string, unit string, location string, result chan WeatherResult, quit chan bool) {
 	defer close(result)
 
 	weather, err := owm.NewCurrent(unit, "EN", apiKey)
@@ -96,6 +96,11 @@ func WeatherGetTemperature(apiKey string, unit string, location string, result c
 			}
 			result <- WeatherResult{temperature: weather.Main.Temp, weather: icon}
 		}
-		time.Sleep(5 * time.Minute)
+
+		select {
+		case <-time.After(5 * time.Minute):
+		case <-quit:
+			return
+		}
 	}
 }

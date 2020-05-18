@@ -15,9 +15,11 @@ import (
 
 // Get system statistics at the specified interval.
 // This will get the current CPU, memory, swap, and disk usage in fractions (0.0-1.0)
-func SysStatsGet(interval time.Duration, results chan []float64) {
+func SysStatsGet(interval time.Duration, results chan []float64, quit chan bool) {
 	var prevIdle, prevTotal, prevIOTicks uint64
 	var prevUptime float64
+
+	defer close(results)
 
 	for {
 		var cpu, mem, swap, disk float64
@@ -85,6 +87,12 @@ func SysStatsGet(interval time.Duration, results chan []float64) {
 		}
 
 		results <- []float64{cpu, mem, swap, disk}
-		time.Sleep(interval)
+
+		select {
+		case <-quit:
+			return
+		case <-time.After(interval):
+		}
+
 	}
 }
