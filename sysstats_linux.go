@@ -3,6 +3,8 @@
 
 // +build linux
 
+// Get system status from /proc/ and /sys/ (Linux edition)
+
 package main
 
 import (
@@ -15,7 +17,7 @@ import (
 
 // Get system statistics at the specified interval.
 // This will get the current CPU, memory, swap, and disk usage in fractions (0.0-1.0)
-func SysStatsGet(interval time.Duration, results chan []float64, quit chan bool) {
+func SystemStats(interval time.Duration, results chan []float64, quit chan bool) {
 	var prevIdle, prevTotal, prevIOTicks uint64
 	var prevUptime float64
 

@@ -1,6 +1,11 @@
 // Copyright 2020 Albert "Drauthius" Diserholt. All rights reserved.
 // Licensed under the MIT License.
 
+// Get status for GMail. This requires some work on your part. Register a project on console.developers.google.com,
+// then give access to that project to use GMail, and lastly create an OAuth 2.0 Client ID. The resulting JSON-file can be
+// given as an argument to the program, and the first time you will be prompted with an URL to visit, and a token to
+// fill in after logging in on the site.
+
 package main
 
 import (
@@ -94,7 +99,7 @@ func saveTokenToFile(file string, token *oauth2.Token) {
 }
 
 // Start a loop that gets the count of unread messages for a specific label.
-func GmailGetNumUnread(credentials string, label string, result chan int64, quit chan bool) {
+func GmailStats(credentials string, label string, result chan int64, quit chan bool) {
 	defer close(result)
 
 	configContent, err := ioutil.ReadFile(credentials)

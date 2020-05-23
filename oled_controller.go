@@ -1,17 +1,19 @@
 // Copyright 2020 Albert "Drauthius" Diserholt. All rights reserved.
 // Licensed under the MIT License.
 
+// Show programmable information on the OLED screens. This file is responsible for finding the screens, talking with
+// the QMK firmware, and keeping track of the tags that are to be shown on them.
+// Note that a special version of the QMK firmware is required, and a special version of glcdfont.c to proper show all
+// the icons and text.
+
 package main
 
 import (
 	"flag"
-	"fmt"
 	"log"
-	"math"
 	"os"
 	"os/signal"
 	"runtime"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -19,192 +21,211 @@ import (
 	"github.com/bearsh/hid"
 )
 
-// The USB vendor ID to look for.
-const VENDOR_ID = 0xFC51
-
-// The USB product ID to look for.
-const PRODUCT_ID = 0x058
-
-// The USB usage to look for (Windows only).
-const USAGE = 0x0061
-
-// The USB usage page to look for (Windows only)
-const USAGE_PAGE = 0xFF60
-
-// The USB interface number to look for (Linux only)
-const INTERFACE = 1
-
-// The character to use for drawing a horizontal bar.
-const BAR_CHAR = string(0x7F)
-
-// The character(s) to use for drawing a mail icon.
-const MAIL_ICON = "\x01\x02"
-
-// The character to use to draw the degree (°) symbol.
-const DEGREES_ICON = string(0x11)
-
-// The type of a command to the OLED controller.
-type Command byte
-
-// Commands understood by the OLED controller.
+// Device detection constants.
 const (
-	// Set up the OLED controller, and get the screen size.
-	SetUp = 0x00
-	// Clear the OLED screen.
-	Clear = 0x01
-	// Set the content of a line on the OLED screen.
-	SetLine = 0x02
-	// Write changed lines to the screen.
-	Present = 0x03
-)
-
-// The type of a screen identifier.
-type Screen byte
-
-// Screen identifiers
-const (
-	// Reference for the OLED screen on the master side
-	Master = 0x00
-	// Reference for the OLED screen on the slave side
-	Slave = 0x01
+	VENDOR_ID  = 0xFC51 // The USB vendor ID to look for.
+	PRODUCT_ID = 0x058  // The USB product ID to look for.
+	USAGE      = 0x0061 // The USB usage to look for (Windows only).
+	USAGE_PAGE = 0xFF60 // The USB usage page to look for (Windows only)
+	INTERFACE  = 1      // The USB interface number to look for (Linux only)
 )
 
 // Struct containing the program arguments
 type Args struct {
-	// Whether debugging is enabled
-	debug *bool
-	// The name of the disk for which to show I/O usage (Linux only)
-	sysStatDisk *string
-	// The path to the JSON credential file for fetching GMail information.
-	gmailCredentials *string
-	// The label for which to fetch the number of unread messages.
-	gmailLabel *string
-	// The openweather.org API key
-	weatherKey *string
-	// The units in which to display temperature.
-	weatherUnit *string
-	// The location for which to get the current temperature.
-	weatherLocation *string
+	debug            *bool   // Whether debugging is enabled
+	temperatureUnit  *string // The unit in which to display temperature (C, F, or K).
+	sysStatDisk      *string // The name of the disk for which to show I/O usage (Linux only)
+	gmailCredentials *string // The path to the JSON credential file for fetching GMail information.
+	gmailLabel       *string // The label for which to fetch the number of unread messages.
+	weatherKey       *string // The openweathermap.org API key
+	weatherLocation  *string // The location for which to get the current temperature.
 }
 
 // Global argument object
 var gArgs Args
 
+// Icon constants. Assumes a custom glcdfont.c to show some of the nicer icons.
+const (
+	BAR_CHAR     = "\x7F"     // The character to use for drawing a horizontal bar.
+	MAIL_ICON    = "\x01\x02" // The character(s) to use for drawing a mail icon.
+	DEGREES_ICON = "\x11"     // The character to use to draw the degree (°) symbol.
+	FAN_ICON_1   = "\x12\x13" // Characters showing a fan icon, variant 1
+	FAN_ICON_2   = "\x14\x15" // Characters showing a fan icon, variant 2
+)
+
+type CommandID byte // The type of a command to the OLED controller.
+// Commands understood by the OLED controller.
+const (
+	SetUp   = 0x00 // Set up the OLED controller, and get the screen size.
+	Clear   = 0x01 // Clear an OLED screen.
+	SetLine = 0x02 // Set the content of a line on an OLED screen.
+	Present = 0x03 // Show changed lines to a screen.
+)
+
+type EventID byte // The type of an event from the OLED controller.
+// Events understood by the OLED controller.
+const (
+	ChangeTag    = 0x00 // Change the content of a screen.
+	IncrementTag = 0x01 // Increment the tag shown on the screen by one.
+	DecrementTag = 0x02 // Decrement the tag shown on the screen by one.
+)
+
+type ScreenID byte // The type of a screen identifier.
+// Screen identifiers
+const (
+	Master = 0x00 // OLED screen on the master side
+	Slave  = 0x01 // OLED screen on the slave side
+)
+
+// Constants for the types of messages sent by the firmware.
+const (
+	ResponseType = 0x00 // A response to a command.
+	EventType    = 0x01 // A event triggered by keycodes.
+)
+
+// Structure holding a response from the OLED controller.
+type Response struct {
+	Success bool      // Whether the command was successful.
+	Command CommandID // The command that was issued.
+	Screen  ScreenID  // Which screen the command was for.
+	Params  []byte    // Additional parameters sent by the firmware.
+}
+
+// Structure holding an event from the OLED controller.
+type Event struct {
+	Event  EventID  // The event that was issued.
+	Screen ScreenID // Which screen the event is for.
+	Params []byte   // Addition parameters set by the firmware.
+}
+
 // Class for OLED control
 type OLEDController struct {
-	// The associated HID device
-	device *hid.Device
-	// The number of columns and rows available on the display(s)
-	columns, rows uint8
+	Device        *hid.Device // The associated HID device
+	Columns, Rows uint8       // The number of columns and rows available on the display(s)
 }
 
-// Fill the content of the master screen
-// The first line is the time, the second is the current layer, the third an motivational message or number of
-// unread messages, and the fourth is the current temperature.
-func (oled *OLEDController) DrawMaster(quit chan bool, wg *sync.WaitGroup) {
-	info := []string{"", "Layer: %l", "You look great today!", ""}
-	unreadMails := make(chan int64, 5)
-	weatherReport := make(chan WeatherResult, 5)
-	stop := make(chan bool, 2)
+// Screen size, in characters.
+type Area struct {
+	Width, Height uint8 // The width and height
+}
 
+// Class for screen control
+type Screen struct {
+	ID         ScreenID        // The screen's unique ID
+	Controller *OLEDController // Reference to the OLED controller
+	Tag        uint8           // Which tag to show
+	Events     chan Event      // Channel to handle events
+	Quit       chan bool       // Channel to handle termination
+}
+
+// Start the screen handler.
+// It will run until the screen.Quit channel has been closed.
+func (screen *Screen) Run(wg *sync.WaitGroup) {
+	wg.Add(1)
 	defer wg.Done()
-	defer oled.SendCommand(Clear, Master, nil)
+	defer screen.Controller.SendCommand(Clear, screen.ID, nil)
 
-	wait := 0
+	stopped := false
+	hasTag := false
+	stop := make(chan bool)
+	results := make(chan []string, 5)
 
-	if *gArgs.gmailCredentials != "" {
-		go GmailGetNumUnread(*gArgs.gmailCredentials, *gArgs.gmailLabel, unreadMails, stop)
-		wait++
+	showTag := func(tagID uint8) {
+		tag, found := tags[tagID]
+		if !found {
+			log.Printf("Tag %d out of range.", tagID)
+		} else {
+			hasTag = true
+			screen.Tag = tagID
+			results = make(chan []string, 5)
+			go tag.Draw(Area{screen.Controller.Columns, screen.Controller.Rows}, results, stop)
+		}
 	}
 
-	if *gArgs.weatherKey != "" && *gArgs.weatherLocation != "" {
-		go WeatherGetTemperature(*gArgs.weatherKey, *gArgs.weatherUnit, *gArgs.weatherLocation, weatherReport, stop)
-		wait++
-	}
-
-	// TODO: Replace more characters, since the firmware probably only supports [a-zA-Z]
-	replacer := strings.NewReplacer("ö", "o")
+	showTag(screen.Tag)
 
 	for {
-		info[0] = time.Now().Local().Format("Mon Jan _2 15:04:05")
-		oled.DrawScreen(Master, info)
-
 		select {
-		case numUnread, more := <-unreadMails:
-			if !more {
-				info[2] = ""
-				wait--
-				if wait < 1 {
-					return
-				}
+		case event := <-screen.Events:
+			if event.Screen != screen.ID {
+				log.Panicln("Received event intended for another screen:", event)
+			} else if stopped {
+				log.Println("Got event while shutting down:", event)
 				continue
 			}
-			info[2] = fmt.Sprintf("%s%d unread emails", MAIL_ICON, numUnread)
-		case weather, more := <-weatherReport:
+
+			var tag uint8
+			switch event.Event {
+			case ChangeTag:
+				tag = event.Params[0]
+			case IncrementTag:
+				if len(tags) < 1 {
+					log.Printf("Cannot increment tag: No tags found.")
+					continue
+				}
+				// TODO: This check doesn't account for a non-consecutive tags map, that doesn't start at 1.
+				tag = screen.Tag + 1
+				if _, found := tags[tag]; !found {
+					tag = 1
+					if _, found := tags[tag]; !found {
+						log.Printf("Failed to increment tag of screen 0x%02X currently on tag %d.\n", screen.ID, screen.Tag)
+						continue
+					}
+				}
+			case DecrementTag:
+				if len(tags) < 1 {
+					log.Printf("Cannot increment tag: No tags found.")
+					continue
+				}
+				// TODO: This check doesn't account for a non-consecutive tags map, that doesn't end on len(tags)
+				tag = screen.Tag - 1
+				if _, found := tags[tag]; !found {
+					tag = uint8(len(tags))
+					if _, found := tags[tag]; !found {
+						log.Printf("Failed to decrement tag of screen 0x%02X currently on tag %d.\n", screen.ID, screen.Tag)
+						continue
+					}
+				}
+			}
+
+			// Change the currently shown tag.
+			if hasTag {
+				stop <- true
+			}
+			showTag(tag)
+		case lines, more := <-results:
 			if !more {
-				info[3] = ""
-				wait--
-				if wait < 1 {
+				if stopped {
 					return
 				}
-				continue
-			}
-			info[3] = fmt.Sprintf("%s%d%s%s in %s",
-				WEATHER_ICONS[weather.weather],
-				int(math.Round(weather.temperature)),
-				DEGREES_ICON,
-				*gArgs.weatherUnit,
-				replacer.Replace(strings.Split(*gArgs.weatherLocation, ",")[0]))
-		case <-time.After(1 * time.Second):
-		case <-quit:
-			if wait < 1 {
-				return
+				hasTag = false
+				screen.Controller.SendCommand(Clear, screen.ID, nil)
 			} else {
-				for i := 0; i < wait; i++ {
+				screen.Controller.DrawScreen(screen.ID, lines)
+			}
+		case <-screen.Quit:
+			screen.Controller.SendCommand(Clear, screen.ID, nil)
+			if hasTag {
+				if !stopped {
 					stop <- true
 				}
-			}
-		}
-	}
-}
-
-// Fill the content of the slave screen with system statistics.
-func (oled *OLEDController) DrawSlave(quit chan bool, wg *sync.WaitGroup) {
-	results := make(chan []float64, 5)
-	barLen := oled.columns - 6
-	columns := []string{"CPU%", "Mem%", "Swap", "Disk"}
-
-	defer wg.Done()
-	defer oled.SendCommand(Clear, Slave, nil)
-
-	go SysStatsGet(1*time.Second, results, quit)
-	for {
-		select {
-		case values, more := <-results:
-			if !more {
+			} else {
 				return
 			}
-
-			output := make([]string, len(values))
-			for i := range values {
-				value := math.Min(math.Max(0.0, values[i]), 1.0)
-				// Draw the label and a nice bar.
-				output[i] = fmt.Sprintf("%s[%-*s]", columns[i], barLen, strings.Repeat(BAR_CHAR, int(math.Round(float64(barLen)*value))))
-			}
-			oled.DrawScreen(Slave, output)
+			stopped = true
 		}
 	}
 }
 
-// Fill the content of the specified screen with the specified content.
-func (oled *OLEDController) DrawScreen(screen Screen, lines []string) {
+// Draw the specified content to the specified screen.
+func (oled *OLEDController) DrawScreen(screen ScreenID, lines []string) {
 	for i, line := range lines {
-		if i > int(oled.rows) {
-			log.Printf("Attempting to draw more rows than the OLED supports: %d/%d\n", i, oled.rows)
+		if i > int(oled.Rows) {
+			log.Printf("Attempting to draw more rows than the OLED supports: %d/%d\n", i, oled.Rows)
 			break
 		}
-		if len(line) > int(oled.columns) && *gArgs.debug {
-			log.Printf("Attempting to draw more columns than the OLED supports: %d/%d\n", len(line), oled.columns)
+		if len(line) > int(oled.Columns) && *gArgs.debug {
+			log.Printf("Attempting to draw more columns than the OLED supports: %d/%d\n", len(line), oled.Columns)
 		}
 		oled.SendCommand(SetLine, screen, append([]byte{byte(i)}, line...))
 		time.Sleep(10 * time.Millisecond) // Ensure that the command gets handled properly.
@@ -213,7 +234,7 @@ func (oled *OLEDController) DrawScreen(screen Screen, lines []string) {
 }
 
 // Send a command to the OLED controller.
-func (oled *OLEDController) SendCommand(cmd Command, screen Screen, data []byte) bool {
+func (oled *OLEDController) SendCommand(cmd CommandID, screen ScreenID, data []byte) bool {
 	buf := make([]byte, 32)
 
 	// Special sequence that will bypass VIA, if enabled.
@@ -230,7 +251,7 @@ func (oled *OLEDController) SendCommand(cmd Command, screen Screen, data []byte)
 		copy(buf[4:32], data)
 	}
 
-	_, err := oled.device.Write(buf)
+	_, err := oled.Device.Write(buf)
 	if err != nil {
 		log.Println("Failed to write to device:", err)
 		return false
@@ -242,32 +263,54 @@ func (oled *OLEDController) SendCommand(cmd Command, screen Screen, data []byte)
 	return true
 }
 
-// Read a response from the OLED controller.
-func (oled *OLEDController) ReadResponse() ([]byte, error) {
+// Read a response or event from the OLED controller.
+func (oled *OLEDController) ReadResponse() (interface{}, error) {
 	buf := make([]byte, 32)
-	size, err := oled.device.ReadTimeout(buf, 500)
+	size, err := oled.Device.ReadTimeout(buf, 500)
 	if err != nil {
 		log.Println("Failed to read from device:", err)
 		return nil, err
 	} else if size < 1 {
+		// Timed out
 		return nil, nil
 	}
 
 	if *gArgs.debug {
 		log.Println("<", buf[:size])
 	}
-	if buf[0] != 0 {
-		log.Printf("Command 0x%02X failed with error 0x%02X.", buf[2], buf[0])
+	switch buf[1] {
+	case ResponseType:
+		resp := Response{
+			Success: buf[0] == 0x00,
+			Command: CommandID(buf[2]),
+			Screen:  ScreenID(buf[3]),
+			Params:  buf[4:],
+		}
+
+		if !resp.Success {
+			log.Printf("Command 0x%02X failed with error 0x%02X.\n", resp.Command, buf[0])
+			return nil, nil
+		}
+
+		return resp, nil
+	case EventType:
+		event := Event{
+			Event:  EventID(buf[2]),
+			Screen: ScreenID(buf[3]),
+			Params: buf[4:],
+		}
+		return event, nil
+	default:
+		log.Printf("Received unknown message 0x%02X\n", buf[1])
 		return nil, nil
 	}
-	return buf[4:], nil
 }
 
 // Loop setting up and filling the OLED screens.
 func (oled *OLEDController) Run() {
-	defer oled.device.Close()
+	defer oled.Device.Close()
 
-	if err := oled.device.SetNonblocking(false); err != nil {
+	if err := oled.Device.SetNonblocking(false); err != nil {
 		log.Println("Failed to set the device blocking.")
 		return
 	}
@@ -279,14 +322,19 @@ func (oled *OLEDController) Run() {
 		log.Println("Set up failed.")
 		return
 	}
-
-	oled.columns = resp[0]
-	oled.rows = resp[1]
+	switch resp.(type) {
+	case Response:
+		oled.Columns = resp.(Response).Params[0]
+		oled.Rows = resp.(Response).Params[1]
+	default:
+		log.Println("Wrong response for set up command.")
+		return
+	}
 
 	if *gArgs.debug {
-		log.Printf("OLED size %dx%d\n", oled.columns, oled.rows)
+		log.Printf("OLED size %dx%d\n", oled.Columns, oled.Rows)
 	}
-	if oled.columns < 1 || oled.rows < 1 {
+	if oled.Columns < 1 || oled.Rows < 1 {
 		log.Println("Failed to get screen size from set up.")
 		return
 	}
@@ -296,43 +344,57 @@ func (oled *OLEDController) Run() {
 
 	var wg sync.WaitGroup
 	quit := make(chan bool, 5)
+	masterCtrl := make(chan Event, 1)
+	slaveCtrl := make(chan Event, 1)
 
-	wg.Add(1)
-	// Read loop. Currently a bit silly, since the firmware doesn't send things of its own volition.
+	// Read loop. Makes sure that responses and events are processed.
 	go func() {
+		wg.Add(1)
 		defer wg.Done()
 		for {
 			select {
 			case <-quit:
 				return
 			default:
-				if _, err := oled.ReadResponse(); err != nil {
+				resp, err := oled.ReadResponse()
+				if err != nil {
 					// Read error. Device is probably unreachable.
 					sigs <- syscall.SIGHUP
 					return
+				} else if resp != nil {
+					switch resp.(type) {
+					case Event:
+						switch resp.(Event).Screen {
+						case Master:
+							masterCtrl <- resp.(Event)
+						case Slave:
+							slaveCtrl <- resp.(Event)
+						default:
+							log.Printf("Got event 0x%02X for unknown screen 0x%02X.\n",
+								resp.(Event).Event,
+								resp.(Event).Screen)
+						}
+					}
 				}
 			}
 		}
 	}()
 
-	wg.Add(1)
-	go oled.DrawMaster(quit, &wg)
-
-	wg.Add(1)
-	go oled.DrawSlave(quit, &wg)
+	// Start the handlers for the different screens, and specify which tag to show on them initially.
+	go (&Screen{ID: Master, Controller: oled, Tag: 1, Events: masterCtrl, Quit: quit}).Run(&wg)
+	go (&Screen{ID: Slave, Controller: oled, Tag: 2, Events: slaveCtrl, Quit: quit}).Run(&wg)
 
 	// Wait for signal
 	sig := <-sigs
 
 	log.Println("Stopping due to", sig)
 
-	for i := 0; i < 3; i++ {
-		quit <- true
-	}
+	close(quit)
 	wg.Wait()
 
-	if err := oled.device.SetNonblocking(true); err == nil {
-		// Consume any lingering messages
+	if err := oled.Device.SetNonblocking(true); err == nil {
+		// Consume any lingering messages.
+		// This prevents junk from lying around in the HID pipe, causing failures next run.
 		for {
 			if resp, _ := oled.ReadResponse(); resp == nil {
 				break
@@ -358,12 +420,13 @@ func main() {
 		gArgs.sysStatDisk = flag.String("sysstat-disk", "sda", "Which disk to monitor for I/O usage")
 	}
 
+	gArgs.temperatureUnit = flag.String("temperature-unit", "C", "Temperature unit to use (C/F/K)")
+
 	gArgs.gmailCredentials = flag.String("gmail-credentials", "", "Path to JSON credential file for GMail access")
 	gArgs.gmailLabel = flag.String("gmail-label", "INBOX", "For which label to count unread messages")
 
-	gArgs.weatherKey = flag.String("weather-api-key", "", "API key to openweather.org")
-	gArgs.weatherUnit = flag.String("weather-unit", "C", "Temperature unit to use (C/F/K)")
-	gArgs.weatherLocation = flag.String("weather-location", "", "The location to get the current weather")
+	gArgs.weatherKey = flag.String("weather-api-key", "", "API key to openweathermap.org")
+	gArgs.weatherLocation = flag.String("weather-location", "", "The location to get the current weather as '<city>,<country>'")
 
 	flag.Parse()
 
@@ -384,7 +447,7 @@ func main() {
 				if err != nil {
 					log.Println("Failed to open device:", err)
 				} else {
-					oled := OLEDController{device: device}
+					oled := OLEDController{Device: device}
 					oled.Run()
 				}
 			}

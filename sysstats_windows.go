@@ -3,6 +3,8 @@
 
 // +build windows
 
+// Get system status from TypePerf (Windows edition)
+
 package main
 
 import (
@@ -58,7 +60,7 @@ func typeperf(interval uint, result chan []string, quit chan bool, fields []stri
 
 // Get system statistics at the specified interval, rounded to whole seconds.
 // This will get the current CPU, memory, swap (page file), and disk usage in fractions (0.0-1.0)
-func SysStatsGet(interval time.Duration, results chan []float64, quit chan bool) {
+func SystemStats(interval time.Duration, results chan []float64, quit chan bool) {
 	defer close(results)
 
 	tp := make(chan []string, 5)
@@ -68,6 +70,9 @@ func SysStatsGet(interval time.Duration, results chan []float64, quit chan bool)
 		`\Paging file(_Total)\% Usage`,
 		`\PhysicalDisk(_Total)\% Disk Time`,
 	})
+
+	// System status will take a second to fill up. To avoid it feeling like lag, send an empty result directly.
+	results <- make([]float64, 4)
 
 	for {
 		select {
