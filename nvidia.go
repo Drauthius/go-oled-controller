@@ -1,8 +1,6 @@
 // Copyright 2020 Albert "Drauthius" Diserholt. All rights reserved.
 // Licensed under the MIT License.
 
-// +build linux
-
 // Get status of the first installed NVIDIA graphics card. Uses NVML to communicate with it.
 
 package main
@@ -29,7 +27,10 @@ type GraphicCardResult struct {
 func GraphicCardStats(interval time.Duration, unit string, results chan GraphicCardResult, quit chan bool) {
 	defer close(results)
 
-	nvml.Init()
+	if err := nvml.Init(); err != nil {
+		log.Println("Failed to initiate NVML:", err)
+		return
+	}
 	defer nvml.Shutdown()
 
 	count, err := nvml.GetDeviceCount()
