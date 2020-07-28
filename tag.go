@@ -44,7 +44,7 @@ var tags = map[uint8]Tag{
 func (*GeneralInfo) Draw(area Area, results chan []string, quit chan bool) {
 	defer close(results)
 
-	info := []string{"", "Layer: %l", "You look great today!", ""}
+	info := []string{"", "%l", "You look great today!", ""}
 	unreadMails := make(chan int64, 5)
 	weatherReport := make(chan WeatherResult, 5)
 	stop := make(chan bool)
