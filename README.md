@@ -11,7 +11,7 @@ special icons for the bars, weather condition, fan, etc.
 The program comes pre-programmed with three different views (called tags), which can be shown on two OLED screens.
 Events from the keyboard can be sent to switch between the different tags.
 
-![Example](example.png)
+![Example](example.jpg)
 
 ## System status integration
 
