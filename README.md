@@ -5,8 +5,8 @@ the [QMK firmware](https://github.com/Drauthius/qmk_firmware), such as the Lily5
 firmware, and the firmware flashed to the keyboard, before this program can be used.
 
 In addition to proper support in the firmware, this program uses a custom
-[`glcdfont.c`](https://github.com/Drauthius/qmk_firmware/keyboards/lily58/keymaps/albhen/glcdfont.c) file to show
-special icons for the bars, weather condition, fan, etc.
+[`glcdfont.c`](https://github.com/Drauthius/qmk_firmware/tree/master/keyboards/lily58/keymaps/albhen/glcdfont.c) file
+to show special icons for the bars, weather condition, fan, etc.
 
 The program comes pre-programmed with three different views (called tags), which can be shown on two OLED screens.
 Events from the keyboard can be sent to switch between the different tags.
