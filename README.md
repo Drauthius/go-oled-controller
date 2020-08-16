@@ -1,17 +1,17 @@
 # OLED controller
 
-This directory includes a program to change the content of the OLED screens accompanied with certain keyboards, such as
-the Lily58. It currently only looks for Lily58, and requires specific changes to the
-[keymap](../keyboards/lily58/keymaps/albhen/keymap.c) to make it programmable, but the code can be adapted to support
-other keyboards and devices with OLED screens.
+This project includes a program to control the content of the OLED screen(s) accompanied with certain keyboards that use
+the [QMK firmware](https://github.com/Drauthius/qmk_firmware), such as the Lily58. Support has to be built into the
+firmware, and the firmware flashed to the keyboard, before this program can be used.
 
-In addition to proper support in the firmware, a custom [`glcdfont.c`](../keyboards/lily58/keymaps/albhen/glcdfont.c)
-file is needed, to correctly show icons used for the bars, weather condition, fan, etc.
+In addition to proper support in the firmware, this program uses a custom
+[`glcdfont.c`](https://github.com/Drauthius/qmk_firmware/keyboards/lily58/keymaps/albhen/glcdfont.c) file to show
+special icons for the bars, weather condition, fan, etc.
 
-The program comes pre-programmed with three different views (called tags), which can be shown on the two OLED screens.
-Events from the device can be sent to switch between the different tags. By default, USER00-USER05 can be mapped to
-keys control which tag is shown on which screen. See [`keymap.c`](../keyboards/lily58/keymaps/albhen/keymap.c) for more
-information.
+The program comes pre-programmed with three different views (called tags), which can be shown on two OLED screens.
+Events from the keyboard can be sent to switch between the different tags.
+
+![Example](example.png)
 
 ## System status integration
 
@@ -36,9 +36,11 @@ need to be performed again (though you still need to specify the path to the dow
 ## OpenWeatherMap integration
 
 Shows the current temperature and weather condition in a specified location. An account needs to be created at
-https://openweathermap.org, where you will get a personal API key that needs to be passed to the program, together with
-the desired location for which to get the current weather. The location should be specified in the format
-`<city>,<country>`, e.g. "Los Angeles,US".
+https://openweathermap.org, where you will get a personal API key that needs to be passed to the program using the
+`-weather-api-key` flag, together with the desired location for which to get the current weather with the
+`-weather-location` flag. The location should be specified in the format `<city>,<country>`, e.g. "Los Angeles,US".
+
+The temperature is in Celsius by default. This can be changed with the `-temperature-unit` flag.
 
 ## NVIDIA integration
 
