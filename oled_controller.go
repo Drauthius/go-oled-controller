@@ -25,8 +25,8 @@ import (
 const (
 	VENDOR_ID  = 0xFC51 // The USB vendor ID to look for.
 	PRODUCT_ID = 0x058  // The USB product ID to look for.
-	USAGE      = 0x0061 // The USB usage to look for (Windows only).
-	USAGE_PAGE = 0xFF60 // The USB usage page to look for (Windows only)
+	USAGE      = 0x0061 // The USB usage to look for (Windows/Mac only).
+	USAGE_PAGE = 0xFF60 // The USB usage page to look for (Windows/Mac only)
 	INTERFACE  = 1      // The USB interface number to look for (Linux only)
 )
 
@@ -53,13 +53,28 @@ const (
 	FAN_ICON_2   = "\x14\x15" // Characters showing a fan icon, variant 2
 )
 
+type MessageID byte // The type of a message to/from the OLED controller.
+// Messages understood by the OLED controller.
+const (
+	CommandMsg = 0xC0
+	EventMsg   = 0xC1
+)
+
+type ResultID byte // The type of a result code
+// The result codes
+const (
+	Success = 0x00
+	Failure = 0x01
+)
+
 type CommandID byte // The type of a command to the OLED controller.
 // Commands understood by the OLED controller.
 const (
-	SetUp   = 0x00 // Set up the OLED controller, and get the screen size.
-	Clear   = 0x01 // Clear an OLED screen.
-	SetLine = 0x02 // Set the content of a line on an OLED screen.
-	Present = 0x03 // Show changed lines to a screen.
+	SetUp    = 0x00 // Set up the OLED controller, and get the screen size.
+	Clear    = 0x01 // Clear an OLED screen.
+	SetLine  = 0x02 // Set the content of a line on an OLED screen.
+	SetChars = 0x03 // Set the content of a portion of the OLED screen.
+	Present  = 0x04 // Show changed lines to a screen.
 )
 
 type EventID byte // The type of an event from the OLED controller.
@@ -75,12 +90,6 @@ type ScreenID byte // The type of a screen identifier.
 const (
 	Master = 0x00 // OLED screen on the master side
 	Slave  = 0x01 // OLED screen on the slave side
-)
-
-// Constants for the types of messages sent by the firmware.
-const (
-	ResponseType = 0x00 // A response to a command.
-	EventType    = 0x01 // A event triggered by keycodes.
 )
 
 // Structure holding a response from the OLED controller.
@@ -233,22 +242,23 @@ func (oled *OLEDController) DrawScreen(screen ScreenID, lines []string) {
 	oled.SendCommand(Present, screen, nil)
 }
 
+// Draw over a part of the screen
+// Note: Start offset is zero indexed
+func (oled *OLEDController) DrawChars(screen ScreenID, start uint8, chars string) {
+	oled.SendCommand(SetChars, screen, append([]byte{byte(start), byte(len(chars))}, chars...))
+}
+
 // Send a command to the OLED controller.
 func (oled *OLEDController) SendCommand(cmd CommandID, screen ScreenID, data []byte) bool {
 	buf := make([]byte, 32)
 
-	// Special sequence that will bypass VIA, if enabled.
-	buf[0] = 0x02
-	buf[1] = 0x00
-
-	// Third byte is the command.
-	buf[2] = byte(cmd)
-	// Fourth byte is the screen index.
-	buf[3] = byte(screen)
+	buf[0] = byte(CommandMsg)
+	buf[1] = byte(cmd)
+	buf[2] = byte(screen)
 
 	// Remaining bytes are command-specific.
 	if data != nil {
-		copy(buf[4:32], data)
+		copy(buf[3:32], data)
 	}
 
 	_, err := oled.Device.Write(buf)
@@ -278,13 +288,13 @@ func (oled *OLEDController) ReadResponse() (interface{}, error) {
 	if *gArgs.debug {
 		log.Println("<", buf[:size])
 	}
-	switch buf[1] {
-	case ResponseType:
+	switch buf[0] {
+	case Success, Failure:
 		resp := Response{
-			Success: buf[0] == 0x00,
-			Command: CommandID(buf[2]),
-			Screen:  ScreenID(buf[3]),
-			Params:  buf[4:],
+			Success: buf[0] == Success,
+			Command: CommandID(buf[1]),
+			Screen:  ScreenID(buf[2]),
+			Params:  buf[3:],
 		}
 
 		if !resp.Success {
@@ -293,15 +303,15 @@ func (oled *OLEDController) ReadResponse() (interface{}, error) {
 		}
 
 		return resp, nil
-	case EventType:
+	case EventMsg:
 		event := Event{
-			Event:  EventID(buf[2]),
-			Screen: ScreenID(buf[3]),
-			Params: buf[4:],
+			Event:  EventID(buf[1]),
+			Screen: ScreenID(buf[2]),
+			Params: buf[3:],
 		}
 		return event, nil
 	default:
-		log.Printf("Received unknown message 0x%02X\n", buf[1])
+		log.Printf("Received unknown message 0x%02X\n", buf[0])
 		return nil, nil
 	}
 }
@@ -340,7 +350,7 @@ func (oled *OLEDController) Run() {
 	}
 
 	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
 	var wg sync.WaitGroup
 	quit := make(chan bool, 5)
@@ -388,6 +398,7 @@ func (oled *OLEDController) Run() {
 	sig := <-sigs
 
 	log.Println("Stopping due to", sig)
+	signal.Reset() // Reset signal handling to terminate in case another one is issued
 
 	close(quit)
 	wg.Wait()
@@ -433,7 +444,7 @@ func main() {
 	for {
 		for _, devInfo := range hid.Enumerate(VENDOR_ID, PRODUCT_ID) {
 			found := false
-			if runtime.GOOS == "windows" {
+			if runtime.GOOS != "linux" {
 				found = devInfo.Usage == USAGE && devInfo.UsagePage == USAGE_PAGE
 			} else {
 				// FIXME: This check is weak, and will match a keyboard without raw HID enabled...
