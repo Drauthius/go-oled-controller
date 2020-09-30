@@ -23,8 +23,8 @@ import (
 
 // Device detection constants.
 const (
-	VENDOR_ID  = 0xFC51 // The USB vendor ID to look for.
-	PRODUCT_ID = 0x058  // The USB product ID to look for.
+	VENDOR_ID  = 0x04D8 // The USB vendor ID to look for.
+	PRODUCT_ID = 0xEB2D // The USB product ID to look for.
 	USAGE      = 0x0061 // The USB usage to look for (Windows/Mac only).
 	USAGE_PAGE = 0xFF60 // The USB usage page to look for (Windows/Mac only)
 	INTERFACE  = 1      // The USB interface number to look for (Linux only)
